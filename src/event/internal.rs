@@ -78,4 +78,7 @@ pub(crate) enum InternalEvent {
     /// Attributes and architectural class of the terminal.
     #[cfg(unix)]
     PrimaryDeviceAttributes,
+    /// The cell size in pixels (`height`, `width`).
+    #[cfg(unix)]
+    CellSizePixels(u16, u16),
 }

@@ -202,6 +202,7 @@ pub(crate) fn parse_csi(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
                         b'~' => return parse_csi_special_key_code(buffer),
                         b'u' => return parse_csi_u_encoded_key_code(buffer),
                         b'R' => return parse_csi_cursor_position(buffer),
+                        b't' => return parse_csi_cell_size_pixels(buffer),
                         _ => return parse_csi_modifier_key_code(buffer),
                     }
                 }
@@ -254,6 +255,25 @@ pub(crate) fn parse_csi_cursor_position(buffer: &[u8]) -> io::Result<Option<Inte
     let x = next_parsed::<u16>(&mut split)? - 1;
 
     Ok(Some(InternalEvent::CursorPosition(x, y)))
+}
+
+pub(crate) fn parse_csi_cell_size_pixels(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
+    // ESC [ 6 ; height ; width t
+    //   height - cell height in pixels
+    //   width  - cell width in pixels
+    assert!(buffer.starts_with(b"\x1B[")); // ESC [
+    assert!(buffer.ends_with(b"t"));
+
+    let s = std::str::from_utf8(&buffer[2..buffer.len() - 1])
+        .map_err(|_| could_not_parse_event_error())?;
+
+    let mut split = s.split(';');
+
+    let _ = next_parsed::<u16>(&mut split)? - 1; // should be 6
+    let height = next_parsed::<u16>(&mut split)? - 1;
+    let width = next_parsed::<u16>(&mut split)? - 1;
+
+    Ok(Some(InternalEvent::CellSizePixels(height, width)))
 }
 
 fn parse_csi_keyboard_enhancement_flags(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
@@ -671,7 +691,7 @@ pub(crate) fn parse_csi_rxvt_mouse(buffer: &[u8]) -> io::Result<Option<InternalE
         .map_err(|_| could_not_parse_event_error())?;
     let mut split = s.split(';');
 
-    let cb = next_parsed::<u8>(&mut split)?
+    let cb = next_parsed::<u16>(&mut split)?
         .checked_sub(32)
         .ok_or_else(could_not_parse_event_error)?;
     let (kind, modifiers) = parse_cb(cb)?;
@@ -699,7 +719,7 @@ pub(crate) fn parse_csi_normal_mouse(buffer: &[u8]) -> io::Result<Option<Interna
     let cb = buffer[3]
         .checked_sub(32)
         .ok_or_else(could_not_parse_event_error)?;
-    let (kind, modifiers) = parse_cb(cb)?;
+    let (kind, modifiers) = parse_cb(cb.into())?;
 
     // See http://www.xfree86.org/current/ctlseqs.html#Mouse%20Tracking
     // The upper left character position on the terminal is denoted as 1,1.
@@ -728,14 +748,14 @@ pub(crate) fn parse_csi_sgr_mouse(buffer: &[u8]) -> io::Result<Option<InternalEv
         .map_err(|_| could_not_parse_event_error())?;
     let mut split = s.split(';');
 
-    let cb = next_parsed::<u8>(&mut split)?;
+    let cb = next_parsed::<u16>(&mut split)?;
     let (kind, modifiers) = parse_cb(cb)?;
 
     // See http://www.xfree86.org/current/ctlseqs.html#Mouse%20Tracking
     // The upper left character position on the terminal is denoted as 1,1.
     // Subtract 1 to keep it synced with cursor
-    let cx = next_parsed::<u16>(&mut split)? - 1;
-    let cy = next_parsed::<u16>(&mut split)? - 1;
+    let cx = next_parsed::<u16>(&mut split)?.saturating_sub(1);
+    let cy = next_parsed::<u16>(&mut split)?.saturating_sub(1);
 
     // When button 3 in Cb is used to represent mouse release, you can't tell which button was
     // released. SGR mode solves this by having the sequence end with a lowercase m if it's a
@@ -773,7 +793,14 @@ pub(crate) fn parse_csi_sgr_mouse(buffer: &[u8]) -> io::Result<Option<InternalEv
 /// - mouse is dragging
 /// - button number
 /// - button number
-fn parse_cb(cb: u8) -> io::Result<(MouseEventKind, KeyModifiers)> {
+fn parse_cb(cb_ext: u16) -> io::Result<(MouseEventKind, KeyModifiers)> {
+    let Ok(cb) = u8::try_from(cb_ext) else {
+        return if cb_ext & (1 << 8) != 0 && cb_ext & (1 << 5) != 0 {
+            Ok((MouseEventKind::KittyLeaveWindow, KeyModifiers::NONE))
+        } else {
+            Err(could_not_parse_event_error())
+        };
+    };
     let button_number = (cb & 0b0000_0011) | ((cb & 0b1100_0000) >> 4);
     let dragging = cb & 0b0010_0000 == 0b0010_0000;
 
